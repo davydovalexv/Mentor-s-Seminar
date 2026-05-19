@@ -1,0 +1,103 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: ml_postgres
+    environment:
+      POSTGRES_DB: oil_analytics
+      POSTGRES_USER: etl_user
+      POSTGRES_PASSWORD: etl_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d
+      - ./Files:/seed_files:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U etl_user -d oil_analytics"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    container_name: ml_minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+  minio-mc:
+    image: minio/mc:latest
+    container_name: ml_minio_mc
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 minioadmin minioadmin; do sleep 2; done;
+      mc mb -p local/lakehouse || true;
+      mc policy set public local/lakehouse || true;
+      exit 0;
+      "
+
+  jupyter:
+    build:
+      context: ./jupyter
+    container_name: ml_jupyter
+    working_dir: /app
+    ports:
+      - "8888:8888"
+    environment:
+      JUPYTER_TOKEN: ml-token
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: oil_analytics
+      POSTGRES_USER: etl_user
+      POSTGRES_PASSWORD: etl_pass
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: lakehouse
+      AWS_DEFAULT_REGION: us-east-1
+      PYTHONPATH: /app
+    volumes:
+      - ./:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+
+  superset:
+    build:
+      context: ./superset
+      dockerfile: Dockerfile
+    container_name: ml_superset
+    ports:
+      - "8088:8088"
+    environment:
+      SUPERSET_SECRET_KEY: super-secret-key-for-local-dev
+      SUPERSET_LOAD_EXAMPLES: "no"
+      PYTHONPATH: /app/pythonpath
+    volumes:
+      - superset_home:/app/superset_home
+      - ./superset/superset_config.py:/app/pythonpath/superset_config.py
+      - ./superset/init_superset.sh:/app/init_superset.sh
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["/bin/sh", "/app/init_superset.sh"]
+
+volumes:
+  pg_data:
+  minio_data:
+  superset_home:
